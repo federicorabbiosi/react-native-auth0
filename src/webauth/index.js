@@ -39,6 +39,9 @@ class WebAuth {
     this.agent = new Agent();
   }
 
+  getClient() {
+    return this.client
+  }
   /**
    * Starts the AuthN/AuthZ transaction against the AS in the in-app browser.
    *
@@ -142,6 +145,79 @@ class WebAuth {
               }).then(() => Promise.resolve(credentials));
             });
         });
+    });
+  }
+
+  getAuthorizeParams(parameters = {}, options = {}) {
+    const {clientId, domain, client, agent} = this;
+    return agent.newTransaction().then(({state, verifier, ...defaults}) => {
+      const redirectUri = callbackUri(domain, options.customScheme);
+      const expectedState = parameters.state || state;
+      if (parameters.invitationUrl) {
+        const urlQuery = url.parse(parameters.invitationUrl, true).query;
+        const {invitation, organization} = urlQuery;
+        if (!invitation || !organization) {
+          throw new AuthError({
+            json: {
+              error: 'a0.invalid_invitation_url',
+              error_description: `The invitation URL provided doesn't contain the 'organization' or 'invitation' values.`,
+            },
+            status: 0,
+          });
+        }
+        parameters.invitation = invitation;
+        parameters.organization = organization;
+      }
+
+      let query = {
+        ...defaults,
+        clientId,
+        responseType: 'code',
+        redirectUri,
+        state: expectedState,
+        ...parameters,
+      };
+      return {
+        authorizeUrl: this.client.authorizeUrl(query),
+        parameters: parameters,
+        options: options,
+        redirectUri: redirectUri,
+        verifier: verifier,
+        expectedState: expectedState
+      }
+    });
+  }
+
+  getCredentialAfterLogin(parameters = {}, options = {}, redirectUri, responseRedirectUrl, verifier, expectedState) {
+    const {clientId, domain, client, agent} = this;
+
+    const query = url.parse(responseRedirectUrl, true).query;
+    const {code, state: resultState, error} = query;
+    if (error) {
+      throw new AuthError({json: query, status: 0});
+    }
+    if (resultState !== expectedState) {
+      throw new AuthError({
+        json: {
+          error: 'a0.state.invalid',
+          error_description: `Invalid state received in redirect url`,
+        },
+        status: 0,
+      });
+    }
+
+    return client
+      .exchange({code, verifier, redirectUri})
+      .then(credentials => {
+        return verifyToken(credentials.idToken, {
+          domain,
+          clientId,
+          nonce: parameters.nonce,
+          maxAge: parameters.max_age,
+          scope: parameters.scope,
+          leeway: options.leeway,
+          orgId: parameters.organization,
+        }).then(() => Promise.resolve(credentials));
     });
   }
 
